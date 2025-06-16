@@ -7,20 +7,7 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers import Trainer, TrainingArguments
 
 from datasets import load_dataset
-from model import GPT, GPTConfig
-
-
-class LanguageModel(torch.nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.gpt = GPT(config)
-
-    def forward(self, input_ids, labels=None, **kwargs):
-        logits, loss = self.gpt(input_ids, labels)
-        outputs = {"logits": logits}
-        if loss is not None:
-            outputs["loss"] = loss
-        return outputs
+from model import NanoGPT, NanoGPTConfig
 
 
 class PromptAnswerHF(torch.utils.data.Dataset):
@@ -37,7 +24,6 @@ class PromptAnswerHF(torch.utils.data.Dataset):
             eot_token = tokenizer.eot_token
 
             input_ids = prompt_ids + answer_ids + [eot_token]
-
             labels = [-100] * len(input_ids)
             for i in range(len(prompt_ids) - 1, len(input_ids) - 1):
                 labels[i] = input_ids[i + 1]
@@ -108,7 +94,7 @@ def main():
     tokenizer = tiktoken.get_encoding("gpt2")
     pad_token_id = tokenizer.eot_token
 
-    # Load model
+    # Load checkpoint
     ckpt = torch.load(args.checkpoint_path, map_location=device)
     state_dict = ckpt.get("model", ckpt)
 
@@ -118,18 +104,17 @@ def main():
             state_dict[k[len(prefix) :]] = state_dict.pop(k)
 
     model_args = ckpt["model_args"]
-    config = GPTConfig(**model_args)
-    model = LanguageModel(config)
-    model.gpt.load_state_dict(state_dict)
+    config = NanoGPTConfig(**model_args)
+    model = NanoGPT(config)
+    model.transformer.load_state_dict(state_dict)
     model.to(device)
 
-    # Load ataset
+    # Dataset
     print(f"Loading dataset '{args.hf_dataset}' split '{args.train_split}'...")
     full_dataset = load_dataset(args.hf_dataset, split=args.train_split)
     dataset = PromptAnswerHF(full_dataset, tokenizer, max_length=args.max_length)
     print(f"Loaded {len(dataset)} examples")
 
-    # Split
     train_size = int(0.95 * len(dataset))
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(
@@ -144,11 +129,13 @@ def main():
         overwrite_output_dir=True,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
         learning_rate=args.lr,
         save_strategy="epoch",
         evaluation_strategy="epoch",
         report_to="none",
         save_safetensors=False,
+        logging_dir=os.path.join(args.output_dir, "logs"),
     )
 
     trainer = Trainer(
@@ -162,12 +149,10 @@ def main():
     print("\nFinetuning...")
     trainer.train()
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    torch.save(
-        {"model": model.gpt.state_dict(), "model_args": model_args},
-        os.path.join(args.output_dir, "ckpt.pt"),
-    )
-    print(f"Model saved to {args.output_dir}/ckpt.pt")
+    # Save model
+    model.save_pretrained(args.output_dir)
+    config.save_pretrained(args.output_dir)
+    print(f"Model saved to {args.output_dir}")
 
 
 if __name__ == "__main__":

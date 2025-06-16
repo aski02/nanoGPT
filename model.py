@@ -15,6 +15,9 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from transformers import PretrainedConfig, PreTrainedModel
+from transformers.modeling_outputs import CausalLMOutput
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -328,3 +331,45 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+
+class NanoGPTConfig(PretrainedConfig):
+    model_type = "nanogpt"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.vocab_size = kwargs.get("vocab_size", 50304)
+        self.block_size = kwargs.get("block_size", 512)
+        self.n_layer = kwargs.get("n_layer", 12)
+        self.n_head = kwargs.get("n_head", 12)
+        self.n_embd = kwargs.get("n_embd", 768)
+        self.dropout = kwargs.get("dropout", 0.0)
+        self.bias = kwargs.get("bias", True)
+
+
+class NanoGPT(PreTrainedModel):
+    config_class = NanoGPTConfig
+
+    def __init__(self, config):
+        super().__init__(config)
+        gpt_config = GPTConfig(
+            vocab_size=config.vocab_size,
+            block_size=config.block_size,
+            n_layer=config.n_layer,
+            n_head=config.n_head,
+            n_embd=config.n_embd,
+            dropout=config.dropout,
+            bias=config.bias,
+        )
+        self.transformer = GPT(gpt_config)
+
+        # Detach shared weight (required by HF saving logic)
+        self.transformer.lm_head.weight = nn.Parameter(
+            self.transformer.lm_head.weight.clone()
+        )
+
+    def forward(self, input_ids, attention_mask=None, labels=None):
+        logits, loss = self.transformer(input_ids, labels)
+        return CausalLMOutput(
+            logits=logits, loss=loss if labels is not None else None
+        )

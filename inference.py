@@ -1,28 +1,30 @@
 import argparse
 import json
+import os
 
 import tiktoken
 import torch
+from safetensors.torch import load_model
 
 from datasets import load_dataset
-from model import GPT, GPTConfig
+from model import NanoGPT, NanoGPTConfig
 
 
-def load_model(checkpoint_path, device):
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    state_dict = ckpt.get("model", ckpt)
+def load_model_safetensors(model_dir, device):
+    # Load config
+    config_path = os.path.join(model_dir, "config.json")
+    with open(config_path, "r") as f:
+        config_data = json.load(f)
+    config = NanoGPTConfig(**config_data)
 
-    prefix = "_orig_mod."
-    for k in list(state_dict.keys()):
-        if k.startswith(prefix):
-            state_dict[k[len(prefix):]] = state_dict.pop(k)
-
-    config = GPTConfig(**ckpt["model_args"])
-    model = GPT(config)
-    model.load_state_dict(state_dict)
+    # Load model
+    model = NanoGPT(config)
+    safetensor_path = os.path.join(model_dir, "model.safetensors")
+    load_model(model, safetensor_path)
     model.to(device)
     model.eval()
     return model
+
 
 def generate_predictions(model, tokenizer, prompt, device):
     if not prompt.endswith(": "):
@@ -32,10 +34,10 @@ def generate_predictions(model, tokenizer, prompt, device):
     x = torch.tensor(prompt_ids, dtype=torch.long, device=device).unsqueeze(0)
 
     with torch.no_grad():
-        y = model.generate(x, max_new_tokens=8, temperature=0.01)
+        y = model.transformer.generate(x, max_new_tokens=8, temperature=0.01)
 
     prediction = tokenizer.decode(y[0].tolist())
-    prediction = prediction[len(prompt):].strip()
+    prediction = prediction[len(prompt) :].strip()
 
     eot_token = tokenizer.eot_token
     eot_str = tokenizer.decode([eot_token])
@@ -44,24 +46,35 @@ def generate_predictions(model, tokenizer, prompt, device):
 
     return prediction
 
+
 def is_correct_answer(prediction, correct_answer, alt_answers):
     pred = prediction.lower().strip()
     correct = correct_answer.lower().strip()
     alt = [a.lower().strip() for a in alt_answers]
     return pred == correct or pred in alt
 
+
 def main():
     parser = argparse.ArgumentParser(description="Inference")
-    parser.add_argument("--checkpoint_path", type=str, required=True)
+    parser.add_argument(
+        "--model_dir",
+        type=str,
+        required=True,
+        help="Path to Hugging Face-format model directory",
+    )
     parser.add_argument("--num_prompts", type=int, default=20)
     parser.add_argument("--output_path", type=str)
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available() else "cpu"
+    )
     print(f"Using device: {device}")
 
     tokenizer = tiktoken.get_encoding("gpt2")
-    model = load_model(args.checkpoint_path, device)
+    model = load_model_safetensors(args.model_dir, device)
 
     print("\nLoading dataset...")
     dataset = load_dataset("quanda-bench-test/trex-subset-split", split="val")
@@ -103,7 +116,10 @@ def main():
         with open(args.output_path, "w") as f:
             for ex in correct_examples:
                 f.write(json.dumps(ex) + "\n")
-        print(f"Saved {len(correct_examples)} correct predictions to {args.output_path}")
+        print(
+            f"Saved {len(correct_examples)} correct predictions to {args.output_path}"
+        )
+
 
 if __name__ == "__main__":
     main()
